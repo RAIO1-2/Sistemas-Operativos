@@ -129,9 +129,9 @@ int             strncmp(const char*, const char*, uint);
 char*           strncpy(char*, const char*, int);
 
 // syscall.c
-void            argint(int, int*);
-int             argstr(int, char*, int);
-void            argaddr(int, uint64 *);
+int             argint(int n, int *ip);
+int             argstr(int n, char *buf, int max);
+int             argaddr(int n, uint64 *pp);
 int             fetchstr(uint64, char*, int);
 int             fetchaddr(uint64, uint64*);
 void            syscall();

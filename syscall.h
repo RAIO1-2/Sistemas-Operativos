@@ -1,1 +1,0 @@
-#define syscall_h 1

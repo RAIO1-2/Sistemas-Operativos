@@ -105,3 +105,26 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+
+
+uint64
+sys_settickets(void)
+{
+  int n; // Variable para guardar el número de tickets
+
+  // argint(0, &n) obtiene el primer (0) argumento entero de la syscall
+  // y lo guarda en la variable 'n'.
+  // En esta versión, no devuelve un error, así que la llamamos directamente.
+  argint(0, &n);
+
+  // Aplicamos la lógica de la tarea: si n < 1, asignar 1
+  if(n < 1) {
+    n = 1;
+  }
+
+  // Asignamos los tickets al proceso actual
+  myproc()->tickets = n;
+  
+  return 0; // Éxito
+}

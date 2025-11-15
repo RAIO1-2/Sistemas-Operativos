@@ -484,3 +484,92 @@ ismapped(pagetable_t pagetable, uint64 va)
   }
   return 0;
 }
+
+static int
+modify_pte_read_perm(pagetable_t pagetable, uint64 va, int perm)
+{
+  pte_t *pte;
+
+  // 1. Encontrar la PTE para esta dirección virtual (va)
+  // walk() es la función de XV6 que recorre la tabla de páginas.
+  // El '0' al final significa que no debe crear la página si no existe.
+  pte = walk(pagetable, va, 0);
+
+  // 2. Validaciones de error 
+  if(pte == 0)
+    return -1; // Error: Página no mapeada
+
+  if((*pte & PTE_V) == 0)
+    return -1; // Error: Página no válida (no presente) 
+
+  if((*pte & PTE_U) == 0)
+    return -1; // Error: No es una página de usuario 
+  
+  // 3. Modificar el bit de Lectura (PTE_R)
+  if(perm == 0) {
+    // Quitar permiso de lectura (mrdprotect)
+    *pte = *pte & ~PTE_R; // Limpia el bit PTE_R
+  } else {
+    // Restaurar permiso de lectura (munrdprotect)
+    *pte = *pte | PTE_R; // Activa el bit PTE_R
+  }
+
+  return 0; // Éxito
+}
+
+
+int
+mrdprotect(uint64 addr, int len)
+{
+  struct proc *p = myproc();
+  uint64 a; // 'a' será la dirección de la página actual en el bucle
+
+  // 1. Validaciones de error iniciales 
+  if(len <= 0) {
+    return -1;
+  }
+  if(addr != PGROUNDDOWN(addr)) {
+    return -1; // Error: addr no está alineada a una página 
+  }
+
+  // 2. Bucle para recorrer todas las páginas afectadas
+  // PGROUNDUP() alinea hacia arriba.
+  // El bucle va de 'a' (addr) hasta (addr + len*PGSIZE), saltando de página en página.
+  for(a = addr; a < addr + (uint64)len * PGSIZE; a += PGSIZE) {
+    // 3. Llamar a nuestra función auxiliar para modificar la PTE
+    // '0' significa "quitar permiso de lectura"
+    if(modify_pte_read_perm(p->pagetable, a, 0) < 0) {
+      // Si falla en alguna página, revierte los cambios
+      // (Esta parte de "revertir" es compleja, por ahora solo devolvemos error)
+      return -1;
+    }
+  }
+
+  return 0; // Éxito
+}
+
+int
+munrdprotect(uint64 addr, int len)
+{
+  struct proc *p = myproc();
+  uint64 a;
+
+  // 1. Validaciones
+  if(len <= 0) {
+    return -1;
+  }
+  if(addr != PGROUNDDOWN(addr)) {
+    return -1;
+  }
+  
+  // 2. Bucle
+  for(a = addr; a < addr + (uint64)len * PGSIZE; a += PGSIZE) {
+    // 3. Llamar a la función auxiliar
+    // '1' significa "restaurar permiso de lectura"
+    if(modify_pte_read_perm(p->pagetable, a, 1) < 0) {
+      return -1;
+    }
+  }
+
+  return 0; // Éxito
+}

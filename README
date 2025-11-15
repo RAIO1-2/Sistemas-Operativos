@@ -1,48 +1,99 @@
-xv6 is a re-implementation of Dennis Ritchie's and Ken Thompson's Unix
-Version 6 (v6).  xv6 loosely follows the structure and style of v6,
-but is implemented for a modern RISC-V multiprocessor using ANSI C.
+# Tarea 3: Implementación de Protección de Memoria en XV6
+## Integrantes: Cristobal pradines, Ignacio Oyarzun
 
-ACKNOWLEDGMENTS
+Este informe detalla la implementación de las llamadas al sistema `mrdprotect` y `munrdprotect` en el kernel de XV6, siguiendo los requisitos de la Tarea 3.
 
-xv6 is inspired by John Lions's Commentary on UNIX 6th Edition (Peer
-to Peer Communications; ISBN: 1-57398-013-7; 1st edition (June 14,
-2000)).  See also https://pdos.csail.mit.edu/6.1810/, which provides
-pointers to on-line resources for v6.
+## 1. Funcionamiento y Lógica de la Implementación
 
-The following people have made contributions: Russ Cox (context switching,
-locking), Cliff Frey (MP), Xiao Yu (MP), Nickolai Zeldovich, and Austin
-Clements.
+El objetivo principal de esta tarea era modificar la tabla de páginas de un proceso para revocar (`mrdprotect`) y restaurar (`munrdprotect`) el permiso de lectura de una o más páginas de memoria, sin alterar otros permisos como el de escritura.
 
-We are also grateful for the bug reports and patches contributed by
-Abhinavpatel00, Takahiro Aoyagi, Marcelo Arroyo, Hirbod Behnam, Silas
-Boyd-Wickizer, Anton Burtsev, carlclone, Ian Chen, clivezeng, Dan
-Cross, Cody Cutler, Mike CAT, Tej Chajed, Asami Doi,Wenyang Duan,
-echtwerner, eyalz800, Nelson Elhage, Saar Ettinger, Alice Ferrazzi,
-Nathaniel Filardo, flespark, Peter Froehlich, Yakir Goaron, Shivam
-Handa, Matt Harvey, Bryan Henry, jaichenhengjie, Jim Huang, Matúš
-Jókay, John Jolly, Alexander Kapshuk, Anders Kaseorg, kehao95,
-Wolfgang Keller, Jungwoo Kim, Jonathan Kimmitt, Eddie Kohler, Vadim
-Kolontsov, Austin Liew, l0stman, Pavan Maddamsetti, Imbar Marinescu,
-Yandong Mao, Matan Shabtay, Hitoshi Mitake, Carmi Merimovich,
-mes900903, Mark Morrissey, mtasm, Joel Nider, Hayato Ohhashi,
-OptimisticSide, papparapa, phosphagos, Harry Porter, Greg Price, Zheng
-qhuo, Quancheng, RayAndrew, Jude Rich, segfault, Ayan Shafqat, Eldar
-Sehayek, Yongming Shen, Fumiya Shigemitsu, snoire, Taojie, Cam Tenny,
-tyfkda, Warren Toomey, Stephen Tu, Alissa Tung, Rafael Ubal, unicornx,
-Amane Uehara, Pablo Ventura, Luc Videau, Xi Wang, WaheedHafez, Keiichi
-Watanabe, Lucas Wolf, Nicolas Wolovick, wxdao, Grant Wu, x653, Andy
-Zhang, Jindong Zhang, Icenowy Zheng, ZhUyU1997, and Zou Chang Wei.
+La lógica central se implementó en `kernel/vm.c` a través de tres funciones:
 
-ERROR REPORTS
+### `modify_pte_read_perm` (Función Auxiliar)
 
-Please send errors and suggestions to Frans Kaashoek and Robert Morris
-(kaashoek,rtm@mit.edu).  The main purpose of xv6 is as a teaching
-operating system for MIT's 6.1810, so we are more interested in
-simplifications and clarifications than new features.
+Esta función estática es el "cerebro" de la operación. Fue creada para evitar la duplicación de código y centralizar la lógica de manipulación de bits.
 
-BUILDING AND RUNNING XV6
+1.  **Búsqueda de PTE:** Utiliza la función `walk(pagetable, va, 0)` para recorrer la tabla de páginas y encontrar la Entrada de Tabla de Página (PTE) que corresponde a la dirección virtual (`va`). Se usa `0` como tercer argumento para indicar que `walk` *no* debe crear páginas nuevas si no las encuentra.
+2.  **Validaciones de Seguridad:** Antes de modificar la PTE, realiza las validaciones de error requeridas por la tarea:
+    * `if(pte == 0)`: La página no está mapeada (no existe).
+    * `if((*pte & PTE_V) == 0)`: La página no es válida (no está presente en memoria).
+    * `if((*pte & PTE_U) == 0)`: La página no es de usuario (`PTE_U` está apagado). Esto es crucial para evitar modificar la memoria del propio kernel.
+3.  **Manipulación de Bits:** Una vez validada, la función usa operaciones bitwise para modificar el permiso de lectura (`PTE_R`):
+    * **Para Proteger (`perm == 0`):**
+        ```c
+        *pte = *pte & ~PTE_R;
+        ```
+        Se utiliza una operación `AND` con la negación (`~`) de `PTE_R`. Esto "limpia" (pone en 0) el bit de lectura, pero **preserva todos los demás bits** (como `PTE_W`, `PTE_X`, `PTE_U`, etc.).
+    * **Para Desproteger (`perm == 1`):**
+        ```c
+        *pte = *pte | PTE_R;
+        ```
+        Se utiliza una operación `OR` para "activar" (poner en 1) el bit de lectura, sin alterar los demás.
 
-You will need a RISC-V "newlib" tool chain from
-https://github.com/riscv/riscv-gnu-toolchain, and qemu compiled for
-riscv64-softmmu.  Once they are installed, and in your shell
-search path, you can run "make qemu".
+### `mrdprotect` y `munrdprotect` (Funciones Principales)
+
+Estas son las funciones que implementan la lógica de la syscall.
+
+1.  Obtienen la tabla de páginas del proceso actual (`myproc()->pagetable`).
+2.  Realizan las validaciones de argumentos iniciales:
+    * `if(len <= 0)`: La longitud debe ser positiva.
+    * `if(addr != PGROUNDDOWN(addr))`: La dirección de inicio debe estar alineada al comienzo de una página.
+3.  Iteran sobre el número de páginas solicitado (`len`). El bucle se mueve de página en página (saltando `PGSIZE` bytes en cada iteración):
+    ```c
+    for(a = addr; a < addr + (uint64)len * PGSIZE; a += PGSIZE)
+    ```
+4.  En cada iteración, llaman a `modify_pte_read_perm` (`a` es la dirección de la página actual) con el permiso `0` (para `mrdprotect`) o `1` (para `munrdprotect`). Si la función auxiliar falla en cualquier página, la operación se detiene y retorna `-1`.
+
+## 2. Modificaciones Realizadas (Archivos)
+
+Para integrar estas funciones en el sistema operativo, se modificó "el plomero" (la plomería) de las llamadas al sistema en XV6:
+
+1.  **`kernel/syscall.h`:** Se añadieron los números de las nuevas syscalls:
+    * `#define SYS_mrdprotect 22`
+    * `#define SYS_munrdprotect 23`
+
+2.  **`kernel/syscall.c`:** Se "conectaron" los números a las funciones del kernel.
+    * Se añadieron las declaraciones `extern uint64 sys_mrdprotect(void);` y `...sys_munrdprotect(void);`.
+    * Se añadieron las entradas al array `syscalls[]` para mapear los números a las funciones.
+
+3.  **`kernel/sysproc.c`:** Se crearon las funciones "wrapper" que leen los argumentos del espacio de usuario.
+    * `sys_mrdprotect()` y `sys_munrdprotect()` usan `argaddr(0, &addr)` y `argint(1, &len)` para obtener los parámetros.
+    * Luego, llaman a las funciones de lógica reales (`mrdprotect` y `munrdprotect`) implementadas en `vm.c`.
+
+4.  **`kernel/defs.h`:** Se añadieron los prototipos de las funciones de lógica (`int mrdprotect(uint64, int);` y `int munrdprotect(uint64, int);`) para que sean "públicas" dentro del kernel y `sysproc.c` pueda encontrarlas.
+
+5.  **`kernel/vm.c`:** Se añadió toda la lógica de implementación descrita en la sección anterior (las 3 funciones).
+
+6.  **`user/usys.pl`:** Se añadieron `entry "mrdprotect";` y `entry "munrdprotect";` para que el script de Perl genere automáticamente el código "stub" en espacio de usuario.
+
+7.  **`user/user.h`:** Se añadieron los prototipos para que los programas de usuario (como nuestros tests) puedan llamar a las funciones: `int mrdprotect(void *addr, int len);` y `int munrdprotect(void *addr, int len);`.
+
+8.  **`Makefile`:** Se añadieron `_rdprotect_test` y `_mrdtest2` a la lista `UPROGS` para que fueran compilados e incluidos en la imagen del sistema de archivos `fs.img`.
+
+9.  **`user/rdprotect_test.c` y `user/mrdtest2.c`:** Se crearon dos programas de prueba. El primero (`rdprotect_test`) probaba solo la protección (esperando un "crash"). El segundo (`mrdtest2`) probaba el ciclo completo de proteger, desproteger y verificar el acceso.
+
+## 3. Dificultades Encontradas y Soluciones
+
+Durante la implementación, surgieron varios desafíos que requirieron depuración y análisis.
+
+### Dificultad 1: Error de Compilación `void value not ignored`
+
+* **Problema:** Inicialmente, en `kernel/sysproc.c`, intentamos verificar el retorno de `argaddr` y `argint` dentro de un `if` (ej: `if(argaddr(...) < 0)`).
+* **Análisis:** El compilador falló con `error: void value not ignored as it ought to be`. Esto nos indicó que, en esta versión de xv6, estas funciones son `void` y no devuelven un valor de error.
+* **Solución:** Se modificó el código para llamar a `argaddr(0, &addr);` y `argint(1, &len);` directamente, sin un `if`, asumiendo que (para esta versión) no fallan o su fallo no es reportado por un valor de retorno.
+
+### Dificultad 2: Falla de `mkfs` por `DIRSIZ`
+
+* **Problema:** Al intentar compilar el segundo archivo de prueba (`munrdprotect_test.c`), `make` falló con un error críptico: `mkfs: ... Assertion 'strlen(shortname) <= DIRSIZ' failed`.
+* **Análisis:** El nombre que `make` intenta registrar en `fs.img` es `_munrdprotect_test`. Contando los caracteres (18), descubrimos que superaba el límite de longitud de nombre de archivo de xv6 (`DIRSIZ`, que es 14).
+* **Solución:** Se renombró el archivo de prueba a `mrdtest2.c` (y `_mrdtest2` en el `Makefile`), un nombre lo suficientemente corto para el sistema de archivos de xv6.
+
+### Dificultad 3 (La más importante): Page Fault al *Escribir* en Memoria Protegida
+
+* **Problema:** El objetivo de la tarea era deshabilitar la *lectura* pero permitir la *escritura* (`R=0, W=1`). Sin embargo, nuestro segundo test (`mrdtest2`) fallaba con un `usertrap` (page fault) en la línea que intentaba *escribir* (`addr[0] = 'A';`).
+* **Análisis:** Esto no fue un error en el código, sino un descubrimiento sobre la arquitectura RISC-V. La especificación de RISC-V (y la mayoría de las CPUs modernas) **exige que una página sea Legible (`PTE_R=1`) para también ser Escribible (`PTE_W=1`)**. El estado de permisos `R=0, W=1` es tratado por el hardware como inválido y genera un *page fault* en cualquier intento de acceso (sea lectura o escritura).
+* **Solución:** Comprendimos que el objetivo original de "solo escritura" no es físicamente posible en esta arquitectura. La protección de lectura (`mrdprotect`) inevitablemente también protege contra la escritura. Para probar el ciclo completo, **modificamos `mrdtest2.c`** para que probara la secuencia correcta:
+    1.  Proteger (`mrdprotect`)
+    2.  Desproteger (`munrdprotect`) **inmediatamente**.
+    3.  **Después** de desproteger, verificar que la escritura (`addr[0] = 'A'`) y la lectura (`char c = addr[0]`) eran posibles.
+    Con este cambio, el test `mrdtest2` SÍ llegó al mensaje de `¡ÉXITO!`, probando que tanto `mrdprotect` como `munrdprotect` funcionan correctamente.
